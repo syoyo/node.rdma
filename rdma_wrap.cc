@@ -289,7 +289,6 @@ static void RDMASendMessage(RDMAConnection* conn)
 
 }
 
-
 static void RDMASendMR(void *context)
 {
     RDMAConnection* conn = (RDMAConnection*)context;
@@ -351,6 +350,104 @@ static void* PollCQ(RDMAContext* s_ctx, void* ctx)
     return NULL;
 }
 
+class
+RDMAClientContext
+{
+public:
+
+  void init(const char* ipaddr, int port) {
+
+    struct addrinfo* addr;
+
+    char buf[1024];
+    sprintf(buf, "%d", port);
+
+    int ret;
+    ret = getaddrinfo(ipaddr, buf, NULL, &addr);
+    assert(ret == 0);
+
+    ret = rdma_create_id(ec, &conn, NULL, RDMA_PS_TCP);
+    assert(!ret);
+
+    int TIMEOUT_IN_MS = 500; // Arbitraray
+    ret = rdma_resolve_addr(conn, NULL, addr->ai_addr, TIMEOUT_IN_MS);
+    assert(!ret);
+
+    freeaddrinfo(addr);
+
+  }
+
+  RDMAClientContext(const char* ipaddr, int port) {
+    init(ipaddr, port);
+  }
+
+  ~RDMAClientContext() {
+    rdma_destroy_event_channel(ec);
+  }
+
+
+private:
+
+  struct rdma_event_channel*  ec;
+  struct rdma_cm_id*          conn;
+  int                         port;
+   
+
+};
+
+class
+RDMAServerContext
+{
+public:
+
+  void init() {
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+
+    ec = rdma_create_event_channel();
+    assert(ec);
+
+    int ret;
+    ret = rdma_create_id(ec, &listener, NULL, RDMA_PS_TCP);
+    assert(!ret);
+
+    ret = rdma_bind_addr(listener, (struct sockaddr *)&addr);
+    assert(!ret);
+
+    ret = rdma_listen(listener, 10); // 10 = backlog, arbitrary
+    assert(!ret);
+
+    port = ntohs(rdma_get_src_port(listener));
+
+    std::cout << "Server: port " << port << std::endl;
+
+  }
+
+  RDMAServerContext() : ec(NULL), listener(NULL), port(0) {
+    init();
+  }
+
+  ~RDMAServerContext() {
+    rdma_destroy_id(listener);
+    rdma_destroy_event_channel(ec);
+  }
+
+
+private:
+
+  struct rdma_event_channel*  ec;
+  struct rdma_cm_id*          listener;
+  int                         port;
+  
+};
+
+static RDMAServerContext* RDMACreateServerContext()
+{
+  return new RDMAServerContext();
+}
+
 
 class EioData
 {
@@ -366,7 +463,7 @@ static Persistent<String> family_symbol;
 static Persistent<String> address_symbol;
 static Persistent<String> port_symbol;
 
-class RDMAWrap : public node::ObjectWrap {
+class RDMA : public node::ObjectWrap {
 public:
 
   static void Initialize(Handle<Object> target) {
@@ -378,7 +475,12 @@ public:
 
     t->InstanceTemplate()->SetInternalFieldCount(1);
 
-    NODE_SET_PROTOTYPE_METHOD(t, "bind", Bind);
+
+
+    // API
+    NODE_SET_PROTOTYPE_METHOD(t, "server", Server);
+    NODE_SET_PROTOTYPE_METHOD(t, "client", Client);
+
 
     rdmaConstructor = Persistent<Function>::New(t->GetFunction());
 
@@ -390,26 +492,81 @@ public:
 
   }
 
+  int val;
+  RDMAContext ctx;
+  RDMAServerContext* serverCtx;
+  RDMAClientContext* clientCtx;
+
 private:
 
+  static Handle<Value> Server(const Arguments& args) {
+    std::cout << "Server" << std::endl;
+
+    RDMA *rdma = ObjectWrap::Unwrap<RDMA>(args.This());
+
+    rdma->serverCtx = new RDMAServerContext();
+    
+  }
+
+  static Handle<Value> Client(const Arguments& args) {
+
+    std::cout << "Client" << std::endl;
+
+    // ("addr", port)
+    assert(args.Length() >= 2);
+    assert(args[0]->IsString());
+    assert(args[1]->IsInt32());
+
+    String::AsciiValue ip_address(args[0]->ToString());
+    int port = args[1]->Int32Value();
+
+    RDMA *rdma = ObjectWrap::Unwrap<RDMA>(args.This());
+    rdma->clientCtx = new RDMAClientContext(*ip_address, port);
+    
+  }
+
   static Handle<Value> Bind(const Arguments& args) {
+    // ("addr", port)
+    assert(args.Length() >= 2);
+    assert(args[0]->IsString());
+    assert(args[1]->IsInt32());
+
+    RDMA *rdma = ObjectWrap::Unwrap<RDMA>(args.This());
+
+    String::AsciiValue ip_address(args[0]->ToString());
+    int port = args[1]->Int32Value();
+
     std::cout << "Bind" << std::endl;
+    std::cout << "addr: " << *ip_address << std::endl;
+    std::cout << "port: " << port << std::endl;
+
   }
 
   static Handle<Value>  New(const Arguments& args) {
-    assert(args.IsConstructCall());
 
     HandleScope scope;
-    RDMAWrap* wrap = new RDMAWrap();
+    if (!args.IsConstructCall()) {
+      return args.Callee()->NewInstance();
+    }
 
-    return scope.Close(args.This());
+    try {
+      (new RDMA())->Wrap(args.This());
+    } catch (const char* msg) {
+      return ThrowException(Exception::Error(String::New(msg)));
+    }
+
+    return args.This();
   }
 
-  RDMAWrap() { }
-  ~RDMAWrap() { }
+  RDMA() {
+    val = 3;
+  }
+
+  ~RDMA() { }
+
 
 };
 
 extern "C" {
-NODE_MODULE(rdma, RDMAWrap::Initialize);
+NODE_MODULE(rdma, RDMA::Initialize);
 }
