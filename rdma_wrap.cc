@@ -19,6 +19,8 @@
 
 using namespace v8;
 
+static const int RDMA_BUFFER_SIZE   = 1024;
+
 typedef struct
 {
     enum {
@@ -55,24 +57,65 @@ typedef struct
     struct ibv_mr               peer_mr;
 
     RDMAMessage*                recv_msg;
-    DDMAMessage*                send_msg;
+    RDMAMessage*                send_msg;
 
     char*                       rdma_local_region;
     char*                       rdma_remote_region;
 
-    enum {
+    typedef enum {
         SS_INIT,
         SS_MR_SENT,
         SS_RDMA_SENT,
         SS_DONE_SENT
-    } send_state;
+    } send_state_t;
 
-    enum {
+    static send_state_t NextSendState(send_state_t state) {
+        switch (state) {
+        case SS_INIT:
+            return SS_MR_SENT;
+            break;
+        case SS_MR_SENT:
+            return SS_RDMA_SENT;
+            break;
+        case SS_RDMA_SENT:
+            return SS_RDMA_SENT;
+            break;
+        case SS_DONE_SENT:
+        default:
+            assert(0);
+            break;
+        }
+    }
+
+    send_state_t                send_state;
+
+    typedef enum {
         RS_INIT,
         RS_MR_RECV,
         RS_DONE_RECV
-    } recv_state;
+    } recv_state_t;
+
+    static recv_state_t NextRecvState(recv_state_t state) {
+        switch (state) {
+        case RS_INIT:
+            return RS_MR_RECV;
+            break;
+        case RS_MR_RECV:
+            return RS_DONE_RECV;
+            break;
+        case RS_DONE_RECV:
+        default:
+            assert(0);
+            break;
+        }
+    }
+
+
+    recv_state_t                recv_state;
+
 } RDMAConnection;
+
+//static void RDMAConnection::send_state
 
 //
 // Builds internal RDMA context from ibv_context
@@ -113,29 +156,6 @@ static void BuildRDMAContext(struct ibv_context* verbs)
     }
 }
 
-static void Connection(struct rdma_cm_id* id)
-{
-    RDMAConnection* conn;
-    struct ibv_qp_init_attr qp_attr;
-
-    BuildRDMAContext(id->verbs);
-    BuildQPAttr(ctx, &qp_attr);
-
-    int ret = rdma_create_qp(id, ctx->pd, &qp_attr);
-    assert(!ret);
-
-    conn->id = id;
-    conn->qp - id->qp;
-    
-    conn->send_state = SS_INIT;
-    conn->recv_state = RS_INIT;
-
-    conn->connected  = 0;
-
-    RDMARegisterMemory(conn);
-    
-}
-
 //
 // Buld queue pair attributes with RDMA context.
 //
@@ -154,10 +174,74 @@ static void BuildQPAttr(const RDMAContext* ctx, struct ibv_qp_init_attr* qp_attr
     
 }
 
+static void RDMARegisterMemory(const RDMAContext* ctx, RDMAConnection* conn)
+{
+    conn->send_msg = (RDMAMessage*)malloc(sizeof(RDMAMessage));
+    conn->recv_msg = (RDMAMessage*)malloc(sizeof(RDMAMessage));
+
+    conn->rdma_local_region     = (char*)malloc(RDMA_BUFFER_SIZE);
+    conn->rdma_remote_region    = (char*)malloc(RDMA_BUFFER_SIZE);
+
+    conn->send_mr = ibv_reg_mr(ctx->pd, conn->send_msg, sizeof(RDMAMessage), IBV_ACCESS_LOCAL_WRITE);
+    assert(conn->send_mr);
+
+    conn->recv_mr = ibv_reg_mr(ctx->pd, conn->recv_msg, sizeof(RDMAMessage), IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE);
+    assert(conn->recv_mr);
+
+    conn->rdma_local_mr = ibv_reg_mr(ctx->pd, conn->rdma_local_region, RDMA_BUFFER_SIZE, IBV_ACCESS_LOCAL_WRITE);
+    assert(conn->rdma_local_mr);
+
+    conn->rdma_remote_mr = ibv_reg_mr(ctx->pd, conn->rdma_remote_region, RDMA_BUFFER_SIZE, IBV_ACCESS_REMOTE_WRITE);
+    assert(conn->rdma_remote_mr);
+}
+
+static void RDMAPostReceives(RDMAConnection* conn)
+{
+    struct ibv_recv_wr wr;
+    struct ibv_recv_wr *bad_wr = NULL;
+    struct ibv_sge sge;
+
+    wr.wr_id = (uintptr_t)conn;
+    wr.next = NULL;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+
+    sge.addr = (uintptr_t)conn->recv_msg;
+    sge.length = sizeof(RDMAMessage);
+    sge.lkey = conn->recv_mr->lkey;
+
+    int ret = ibv_post_recv(conn->qp, &wr, &bad_wr);
+    assert(!ret);
+}
+
+static void Connection(RDMAContext* ctx, struct rdma_cm_id* id)
+{
+    RDMAConnection* conn;
+    struct ibv_qp_init_attr qp_attr;
+
+    BuildRDMAContext(id->verbs);
+    BuildQPAttr(ctx, &qp_attr);
+
+    int ret = rdma_create_qp(id, ctx->pd, &qp_attr);
+    assert(!ret);
+
+    conn->id = id;
+    conn->qp - id->qp;
+    
+    conn->send_state = RDMAConnection::SS_INIT;
+    conn->recv_state = RDMAConnection::RS_INIT;
+
+    conn->connected  = 0;
+
+    RDMARegisterMemory(ctx, conn);
+    RDMAPostReceives(conn);
+    
+}
+
 //
 // Destroy RDMA peer connection.
 //
-static void DestroyConnection(void *context)
+static void RDMADestroyConnection(void *context)
 {
     RDMAConnection* conn = (RDMAConnection*)context;
 
@@ -179,12 +263,75 @@ static void DestroyConnection(void *context)
 
 }
 
+static void RDMASendMessage(RDMAConnection* conn)
+{
+    struct ibv_send_wr wr;
+    struct ibv_send_wr *bad_wr = NULL;
+    struct ibv_sge sge;
+
+    memset(&wr, 0, sizeof(wr));
+
+    wr.wr_id = (uintptr_t)conn;
+    wr.opcode = IBV_WR_SEND;
+    wr.sg_list = &sge;
+    wr.num_sge = 1;
+    wr.send_flags = IBV_SEND_SIGNALED;
+
+    sge.addr = (uintptr_t)conn->send_msg;
+    sge.length = sizeof(RDMAMessage);
+    sge.lkey = conn->send_mr->lkey;
+
+    // @fixme { Is this required? }
+    while (!conn->connected);
+
+    int ret = ibv_post_send(conn->qp, &wr, &bad_wr);
+    assert(!ret);
+
+}
+
+
+static void RDMASendMR(void *context)
+{
+    RDMAConnection* conn = (RDMAConnection*)context;
+
+    conn->send_msg->type = RDMAMessage::MSG_MR;
+    memcpy(&conn->send_msg->data.mr, conn->rdma_remote_mr, sizeof(struct ibv_mr));
+
+    RDMASendMessage(conn);
+}
+
+
 static void OnConnect(void* context)
 {
     ((RDMAConnection*)context)->connected = 1;
 }
 
-static void* PollCQ(void* ctx)
+static void OnCompletion(struct ibv_wc* wc)
+{
+    RDMAConnection* conn = (RDMAConnection*)(uintptr_t)wc->wr_id;
+
+    if (wc->status != IBV_WC_SUCCESS) {
+        // die(expects IBV_WC_SUCCESS)
+        exit(-1);
+    }
+
+    if (wc->opcode & IBV_WC_RECV) {
+        conn->recv_state = RDMAConnection::NextRecvState(conn->recv_state);
+
+        if (conn->recv_msg->type == RDMAMessage::MSG_MR) {
+            memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
+            RDMAPostReceives(conn);
+
+            if (conn->send_state == RDMAConnection::SS_INIT) {
+                RDMASendMR(conn);
+            }
+        }
+    } else {
+        conn->send_state = RDMAConnection::NextSendState(conn->send_state);
+    }
+}
+
+static void* PollCQ(RDMAContext* s_ctx, void* ctx)
 {
     struct ibv_cq* cq;
     struct ibv_wc  wc;
@@ -204,65 +351,6 @@ static void* PollCQ(void* ctx)
     return NULL;
 }
 
-static void OnCompletion(struct ibv_wc* wc)
-{
-    RDAConnection* conn = (RDMAConnection*)(uintptr_t)wc->wr_id;
-
-    if (wc->status != IBV_WC_SUCCESS) {
-        // die(expects IBV_WC_SUCCESS)
-    }
-
-    if (wc->opcode & IBV_WC_RECV) {
-        conn->recv_state++;
-
-        if (conn->recv_msg->type == MSG_MR) {
-            memcpy(&conn->peer_mr, &conn->recv_msg->data.mr, sizeof(conn->peer_mr));
-            post_receives(conn);
-
-            if (conn->send_state == SS_INIT) {
-                send_mr(conn);
-            }
-        }
-    } else {
-        con->send_state++;
-    }
-}
-
-static void SendMessage(RDMAConnection* conn)
-{
-    struct ibv_send_wr wr;
-    struct ibv_send_wr *bad_wr = NULL;
-    struct ibv_sge sge;
-
-    memset(&wr, 0, sizeof(wr));
-
-    wr.wr_id = (uintptr_t)conn;
-    wr.opcode = IBV_WR_SEND;
-    wr.sg_list = &sge;
-    wr.num_sge = 1;
-    wr.send_flags = IBV_SEND_SIGNALED;
-
-    sge.addr = (uintptr_t)conn->send_msg;
-    sge.length = sizeof(RDMAMessage);
-    sgw.lkey = conn->send_mr->kley;
-
-    // @fixme { Is this required? }
-    while (!conn->connected);
-
-    int ret = ibv_post_send(conn->qp, &wr, &bad_wr);
-    assert(!ret);
-
-}
-
-static void SendMR(void *context)
-{
-    RDMAConnection* conn = (RDMAConnection*)context;
-
-    conn->send_msg->type = MSG_MR;
-    memcpy(&conn->send_msg->data.mr, conn->rdma_remote_mr, sizeof(struct ibv_mr));
-
-    SendMessage(conn);
-}
 
 class EioData
 {
