@@ -4,7 +4,7 @@
 // Licensed under BSD license
 //
 
-// node.js
+// node.js and v8
 #include <v8.h>
 #include <node.h>
 
@@ -359,6 +359,57 @@ public:
     ~EioData();
 };
 
-extern "C" void init(Handle<Object> target) {
-    // @todo
+
+Persistent<Function> rdmaConstructor;
+
+static Persistent<String> family_symbol;
+static Persistent<String> address_symbol;
+static Persistent<String> port_symbol;
+
+class RDMAWrap : public node::ObjectWrap {
+public:
+
+  static void Initialize(Handle<Object> target) {
+
+    HandleScope scope;
+
+    Local<FunctionTemplate> t = FunctionTemplate::New(New);
+    t->SetClassName(String::NewSymbol("RDMA"));
+
+    t->InstanceTemplate()->SetInternalFieldCount(1);
+
+    NODE_SET_PROTOTYPE_METHOD(t, "bind", Bind);
+
+    rdmaConstructor = Persistent<Function>::New(t->GetFunction());
+
+    family_symbol = NODE_PSYMBOL("family");
+    address_symbol = NODE_PSYMBOL("address");
+    port_symbol = NODE_PSYMBOL("port");
+
+    target->Set(String::NewSymbol("RDMA"), rdmaConstructor);
+
+  }
+
+private:
+
+  static Handle<Value> Bind(const Arguments& args) {
+    std::cout << "Bind" << std::endl;
+  }
+
+  static Handle<Value>  New(const Arguments& args) {
+    assert(args.IsConstructCall());
+
+    HandleScope scope;
+    RDMAWrap* wrap = new RDMAWrap();
+
+    return scope.Close(args.This());
+  }
+
+  RDMAWrap() { }
+  ~RDMAWrap() { }
+
+};
+
+extern "C" {
+NODE_MODULE(rdma, RDMAWrap::Initialize);
 }
