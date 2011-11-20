@@ -13,7 +13,6 @@ def configure(conf):
 
 def build(bld):
     obj = bld.new_task_gen('cxx', 'shlib', 'node_addon')
-    obj.target = 'rdma'
+    obj.target = 'rdma_cm'
     obj.cxxflags = '-O3'
-    obj.source = 'rdma_wrap.cc'
-
+    obj.source = 'rdma_cm_wrap.cc'
