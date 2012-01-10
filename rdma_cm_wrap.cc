@@ -16,6 +16,7 @@
 
 // RDMA CM
 #include <rdma/rdma_cma.h>
+#include <infiniband/verbs.h>
 
 using namespace v8;
 
@@ -43,13 +44,15 @@ public:
     // API
     NODE_SET_PROTOTYPE_METHOD(t, "create_event_channel", CreateEventChannel);
     NODE_SET_PROTOTYPE_METHOD(t, "destroy_event_channel", DestroyEventChannel);
+    NODE_SET_PROTOTYPE_METHOD(t, "create_id", CreateID);
+    NODE_SET_PROTOTYPE_METHOD(t, "resolve_addr", ResolveAddr);
+    NODE_SET_PROTOTYPE_METHOD(t, "resolve_route", ResolveRoute);
+    NODE_SET_PROTOTYPE_METHOD(t, "get_cm_event", GetCMEvent);
+    NODE_SET_PROTOTYPE_METHOD(t, "ack_cm_event", AckCMEvent);
 
     // @todo {}
-    //NODE_SET_PROTOTYPE_METHOD(t, "create_id", CreateID);
     //NODE_SET_PROTOTYPE_METHOD(t, "destroy_id", DestroyID);
     //NODE_SET_PROTOTYPE_METHOD(t, "bind_addr", BindAddr);
-    //NODE_SET_PROTOTYPE_METHOD(t, "resolve_addr", ResolveAddr);
-    //NODE_SET_PROTOTYPE_METHOD(t, "resolve_route", ResolveRoute);
     //NODE_SET_PROTOTYPE_METHOD(t, "create_qp", CreateQP);
     //NODE_SET_PROTOTYPE_METHOD(t, "destroy_qp", DestroyQP);
     //NODE_SET_PROTOTYPE_METHOD(t, "listen", Listen);
@@ -60,8 +63,6 @@ public:
     //NODE_SET_PROTOTYPE_METHOD(t, "disconnect", Disconnect);
     //NODE_SET_PROTOTYPE_METHOD(t, "join_multicast", JoinMulticast);
     //NODE_SET_PROTOTYPE_METHOD(t, "leave_multicast", LeaveMulticast);
-    //NODE_SET_PROTOTYPE_METHOD(t, "get_cm_event", GetCMEvent);
-    //NODE_SET_PROTOTYPE_METHOD(t, "ack_cm_event", AckCMEvent);
     //NODE_SET_PROTOTYPE_METHOD(t, "get_src_port", GetSrcPort);
     //NODE_SET_PROTOTYPE_METHOD(t, "get_dst_port", GetDstPort);
     //NODE_SET_PROTOTYPE_METHOD(t, "get_local_addr", GetLocalAddr);
@@ -86,19 +87,101 @@ private:
 
     RDMA_CM *rdma_cm = ObjectWrap::Unwrap<RDMA_CM>(args.This());
 
-    Local<Object> channel = Object::New();
+    rdma_cm->event_channel_ = rdma_create_event_channel();
+    assert(rdma_cm->event_channel_);
 
-    struct rdma_create_id *id;
-
-    channel->SetPointerInInternalField(0, id);
-
-    return scope.Close(channel);
-    
   }
 
   static Handle<Value> DestroyEventChannel(const Arguments& args) {
 
-    return args.This();
+    RDMA_CM *rdma_cm = ObjectWrap::Unwrap<RDMA_CM>(args.This());
+
+    rdma_destroy_id(rdma_cm->id_);
+
+  }
+
+  static Handle<Value> CreateID(const Arguments& args) {
+    HandleScope scope;
+
+    RDMA_CM *rdma_cm = ObjectWrap::Unwrap<RDMA_CM>(args.This());
+
+    int ret = rdma_create_id(rdma_cm->event_channel_, &rdma_cm->id_, NULL, RDMA_PS_TCP);
+    assert(ret == 0);
+
+  }
+
+  static Handle<Value> ResolveAddr(const Arguments& args) {
+    HandleScope scope;
+
+    RDMA_CM *rdma_cm = ObjectWrap::Unwrap<RDMA_CM>(args.This());
+
+    // ("addr", "port")
+    assert(args.Length() >= 2);
+    assert(args[0]->IsString());
+    assert(args[1]->IsString());
+
+    String::AsciiValue ip_address(args[0]->ToString());
+    String::AsciiValue port_str(args[1]->ToString());
+
+    struct addrinfo *addr;
+
+    int ret = getaddrinfo(*ip_address, *port_str, NULL, &addr);
+    assert(ret == 0);
+
+    int timeout_ms = 500; // 0.5 sec. @fixme
+    ret = rdma_resolve_addr(rdma_cm->id_, NULL, addr->ai_addr, timeout_ms);
+    assert(ret == 0);
+
+    freeaddrinfo(addr);
+
+  }
+
+  static Handle<Value> GetCMEvent(const Arguments& args) {
+    HandleScope scope;
+
+    RDMA_CM *rdma_cm = ObjectWrap::Unwrap<RDMA_CM>(args.This());
+
+    int ret = rdma_get_cm_event(rdma_cm->event_channel_, &rdma_cm->event_);
+    assert(ret == 0);
+
+    return scope.Close(Integer::New(ret));
+  }
+
+  static Handle<Value> AckCMEvent(const Arguments& args) {
+    HandleScope scope;
+
+    RDMA_CM *rdma_cm = ObjectWrap::Unwrap<RDMA_CM>(args.This());
+
+    // ("addr", "port")
+    assert(args.Length() >= 2);
+    assert(args[0]->IsString());
+    assert(args[1]->IsString());
+
+    String::AsciiValue ip_address(args[0]->ToString());
+    String::AsciiValue port_str(args[1]->ToString());
+
+    struct addrinfo *addr;
+
+    int ret = getaddrinfo(*ip_address, *port_str, NULL, &addr);
+    assert(ret == 0);
+
+    int timeout_ms = 500; // 0.5 sec. @fixme
+    ret = rdma_resolve_addr(rdma_cm->id_, NULL, addr->ai_addr, timeout_ms);
+    assert(ret == 0);
+
+    freeaddrinfo(addr);
+
+  }
+
+  static Handle<Value> ResolveRoute(const Arguments& args) {
+    HandleScope scope;
+
+    RDMA_CM *rdma_cm = ObjectWrap::Unwrap<RDMA_CM>(args.This());
+
+    int timeout_ms = 500; // 0.5 sec. @fixme
+    int ret = rdma_resolve_route(rdma_cm->id_, timeout_ms);
+    assert(ret == 0);
+
 
   }
 
@@ -119,11 +202,19 @@ private:
   }
 
 
-  RDMA_CM() {
+  RDMA_CM() : id_(0), event_channel_(0), event_(0) {
   }
 
-  ~RDMA_CM() { }
+  ~RDMA_CM() {
+    assert(id_ == NULL);
+    assert(event_channel_ == NULL);
+    assert(event_ == NULL);
+  }
 
+
+  struct rdma_cm_id         *id_;
+  struct rdma_event_channel *event_channel_;
+  struct rdma_cm_event      *event_;
 
 };
 
