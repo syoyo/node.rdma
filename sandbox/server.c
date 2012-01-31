@@ -16,6 +16,14 @@
 #include <uv.h>
 #include <pthread.h>
 
+#define ENABLE_DEBUG (1)
+
+#ifdef ENABLE_DEBUG
+#define DEBUGF(x) x
+#else
+#define DEBUGF(x) do { } while (0)
+#endif
+
 static uintptr_t thread1_id = 0;
 static int prepare_cb_called = 0;
 static int async1_cb_called = 0;
@@ -75,8 +83,105 @@ void uv_sleep(int msec) {
 
 #endif
 
+//
+// --------------------------------------------------------------------------
+//
+#define RECV_WRID   (1)
+#define SEND_WRID   (1)
+
+int
+post_recv(
+  struct ibv_qp *qp,
+  struct ibv_mr *mr,
+  void *addr, uint32_t len)
+{
+
+  struct ibv_sge sge;
+  sge.addr    = (uintptr_t)addr;
+  sge.length  = len;
+  sge.lkey    = mr->lkey;
+
+  struct ibv_recv_wr wr;
+  wr.wr_id   = RECV_WRID;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+
+  struct ibv_recv_wr *bad_wr;
+
+  int ret = ibv_post_recv(qp, &wr, &bad_wr);
+  assert(ret == 0);
+
+  return 0;
+  
+}
+
+int
+post_send(
+  struct ibv_qp *qp,
+  struct ibv_mr *mr,
+  void *addr, uint32_t len)
+{
+  struct ibv_sge sge;
+  sge.addr    = (uintptr_t)addr;
+  sge.length  = len;
+  sge.lkey    = mr->lkey;
+
+  struct ibv_send_wr wr;
+  wr.wr_id      = SEND_WRID;
+  wr.opcode     = IBV_WR_SEND;
+  wr.send_flags = IBV_SEND_SIGNALED;
+  wr.sg_list    = &sge;
+  wr.num_sge    = 1;
+
+  struct ibv_send_wr *bad_wr;
+
+  int ret = ibv_post_send(qp, &wr, &bad_wr);
+  assert(ret == 0);
+
+  return 0;
+}
+
+static int
+get_event(
+  struct ibv_comp_channel *comp_chann)
+{
+  int ret = 0;
+  int n = 0;
+
+  struct ibv_cq *cq;
+  struct ibv_wc wc;
+ 
+  void *cq_context; // dummy
+
+  printf("ibv_get_cq_event\n");
+  ret = ibv_get_cq_event(comp_chann, &cq, &cq_context);
+  assert(ret == 0);
+
+  // NOTE: ibv_ack_cq_events takes a lock.
+  // If you want a performance, less calling ibv_ack_cq_events.
+  printf("ibv_ack_cq_events\n");
+  ibv_ack_cq_events(cq, 1);
+
+  // Request notification upon the next completion event. 
+  printf("ibv_req_notify_cq\n");
+  ret = ibv_req_notify_cq(cq, 0);
+  assert(ret == 0);
+
+  // Polls the cq for workd completions.
+  n = ibv_poll_cq(cq, 1, &wc);
+  assert(n == 1);
+
+  // DO on_completion with wc.
 
 
+  
+  
+}
+
+
+//
+// --------------------------------------------------------------------------
+//
 
 static void close_cb(uv_handle_t* handle) {
   printf("close_cb\n");
@@ -220,6 +325,65 @@ static uv_buf_t on_pipe_read_alloc(uv_handle_t* handle,
   return buf;
 }
 
+static struct ibv_pd* pd_;
+static struct ibv_comp_channel* comp_channel_;
+static struct ibv_cq* cq_;
+
+static int on_connect_request(
+  struct rdma_cm_id *id)
+
+{
+  struct rdma_conn_param conn_param;
+
+  DEBUGF(printf("on_connect_request: id = %p\n", id));
+
+  pd_ = ibv_alloc_pd(id->verbs);
+  assert(pd_);
+
+  comp_channel_ = ibv_create_comp_channel(id->verbs);
+  assert(comp_channel_);
+
+  cq_ = ibv_create_cq(id->verbs, 2, NULL, comp_channel_, 0);
+  assert(cq_);
+
+  int ret = ibv_req_notify_cq(cq_, 0);
+  assert(ret == 0);
+
+  struct ibv_qp_init_attr qp_attr = {};
+
+  qp_attr.cap.max_send_wr   = 1;
+  qp_attr.cap.max_send_sge  = 1;
+  qp_attr.cap.max_recv_wr   = 1;
+  qp_attr.cap.max_recv_sge  = 1;
+  qp_attr.send_cq           = cq_;
+  qp_attr.recv_cq           = cq_;
+  qp_attr.qp_type           = IBV_QPT_RC;   // RC 
+
+  printf("rmda_create_qp\n");
+  ret = rdma_create_qp(id, pd_, &qp_attr);
+  assert(ret == 0);
+
+  printf("rmda_accept...\n");
+  ret = rdma_accept(id, &conn_param);
+  assert(ret);
+
+  return 0;
+}
+
+static int on_established(
+  struct rdma_cm_id *id)
+{
+  DEBUGF(printf("on_established: id = %p\n", id));
+  return 0;
+}
+
+static int on_disconnect(
+  struct rdma_cm_id *id)
+{
+  DEBUGF(printf("on_disconnect: id = %p\n", id));
+  return 0;
+}
+
 void thread1_entry(void *arg)
 {
   printf("thread entry...\n");
@@ -228,20 +392,31 @@ void thread1_entry(void *arg)
   assert(!err);
   printf("get cm event ok\n");
 
+  int r = 0;
+
   switch (event->event) {
     case RDMA_CM_EVENT_CONNECT_REQUEST:
-      printf("CONNECT_REQUEST\n");
+      DEBUGF(printf("[DBG] CM: CONNECT_REQUEST\n"));
+      r = on_connect_request(event->id);
+      break;
+    case RDMA_CM_EVENT_ESTABLISHED:
+      DEBUGF(printf("[DBG] CM: ESTABLISHED\n"));
+      r = on_established(event->id);
+      break;
+    case RDMA_CM_EVENT_DISCONNECTED:
+      DEBUGF(printf("[DBG] CM: DISCONNECTED\n"));
+      r = on_disconnect(event->id);
       break;
     default:
-      printf("Unsupported event. %d\n", event->event);
+      fprintf(stderr, "Unsupported event. event = %d, id = %p\n", event->event, event->id);
       assert(0);
   }
 
   rdma_ack_cm_event(event);
 
-  printf("--> async_send.\n");
+  DEBUGF(printf("--> async_send.\n"));
   uv_async_send(&async1_handle);
-  printf("--> exit thread.\n");
+  DEBUGF(printf("--> exit thread.\n"));
 }
 
 static void prepare_cb(
@@ -251,7 +426,7 @@ static void prepare_cb(
   assert(handle == &prepare_handle);
   assert(status == 0);
 
-  printf("prepare_cb %d\n", prepare_cb_called); 
+  DEBUGF(printf("prepare_cb. # of called =  %d\n", prepare_cb_called)); 
 
   if (prepare_cb_called == 0) {
 
@@ -274,7 +449,7 @@ static void async1_cb(
 {
   static async1_closed = 0;
 
-  printf("async1_cb %d\n", async1_cb_called);
+  DEBUGF(printf("async1_cb. called = %d\n", async1_cb_called));
 
   assert(handle == &async1_handle);
   assert(status == 0);
@@ -318,13 +493,13 @@ main(
 
 
 
-  printf("create_event_channel\n");
+  DEBUGF(printf("create_event_channel\n"));
   cm_channel = rdma_create_event_channel();
   assert(cm_channel);
-  printf("create_event_channel ok\n");
+  DEBUGF(printf("create_event_channel ok\n"));
 
   printf("create_id\n");
-  err = rdma_create_id(cm_channel, &listen_id, NULL, RDMA_PS_TCP);
+  err = rdma_create_id(cm_channel, &listen_id, NULL, RDMA_PS_TCP);  // IB RC
   assert(!err);
   printf("create_id ok\n");
 
