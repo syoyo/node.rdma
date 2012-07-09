@@ -1,0 +1,71 @@
+## Short summary: rsocket() far outperforms normal TCP/IP socket().
+##                rsocket() performance is mostly identical to IB verbs.
+
+# IB QDR rsocket connection
+[syoyo@automata003 ~]$ rstream 
+name      bytes   xfers   iters   total       time     Gb/sec    usec/xfer
+64_lat    64      1       1m      122m        2.15s      0.48       1.08
+4k_lat    4k      1       100k    781m        1.03s      6.38       5.14
+64k_lat   64k     1       10k     1.2g        0.56s     18.87      27.78
+1m_lat    1m      1       100     200m        0.07s     24.61     340.88
+64_bw     64      1m      1       122m        0.32s      3.22       0.16
+4k_bw     4k      100k    1       781m        0.28s     23.74       1.38
+64k_bw    64k     10k     1       1.2g        0.42s     25.10      20.89
+1m_bw     1m      100     1       200m        0.07s     25.31     331.39
+
+# IB QDR IPoIB connection
+[syoyo@automata003 ~]$ rstream -T s 
+name      bytes   xfers   iters   total       time     Gb/sec    usec/xfer
+64_lat    64      1       1m      122m       35.05s      0.03      17.52
+4k_lat    4k      1       100k    781m        4.55s      1.44      22.75
+64k_lat   64k     1       10k     1.2g        1.66s      6.31      83.10
+1m_lat    1m      1       100     200m        0.10s     17.08     491.11
+64_bw     64      1m      1       122m        0.55s      1.87       0.27
+4k_bw     4k      100k    1       781m        0.61s     10.81       3.03
+64k_bw    64k     10k     1       1.2g        0.56s     18.86      27.80
+1m_bw     1m      100     1       200m        0.08s     20.54     408.42
+
+# 1 GbE TCP/IP connection
+[syoyo@automata003 ~]$ rstream -T s 
+name      bytes   xfers   iters   total       time     Gb/sec    usec/xfer
+64_lat    64      1       1m      122m       69.55s      0.01      34.77
+4k_lat    4k      1       100k    781m       33.16s      0.20     165.81
+64k_lat   64k     1       10k     1.2g       13.07s      0.80     653.36
+1m_lat    1m      1       100     200m        1.83s      0.92    9126.21
+64_bw     64      1m      1       122m        1.10s      0.93       0.55
+4k_bw     4k      100k    1       781m        7.05s      0.93      35.23
+64k_bw    64k     10k     1       1.2g       11.29s      0.93     564.34
+1m_bw     1m      100     1       200m        1.80s      0.93    8986.55
+
+#
+# Reference. MPI latency.
+#
+
+# OSU MPI Latency Test v3.1.1
+# Size            Latency (us)
+0                         1.13
+1                         1.14
+2                         1.13
+4                         1.15
+8                         1.16
+16                        1.15
+32                        1.18
+64                        1.32
+128                       1.99
+256                       2.13
+512                       2.43
+1024                      3.04
+2048                      4.14
+4096                      5.09
+8192                      7.11
+16384                    10.18
+32768                    15.21
+65536                    25.42
+131072                   45.67
+262144                   86.59
+524288                  168.25
+1048576                 331.43
+2097152                 657.58
+4194304                1312.14
+
+
