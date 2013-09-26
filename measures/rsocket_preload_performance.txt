@@ -1,0 +1,51 @@
+rspreload performance
+---------------------
+
+rspreload could be used for accelerating unmodified socket-based application with InfiniBand(RDMA) by replacing DLL in execution.
+
+<<setup>>
+
+librdmacm: 
+git 6152fb2ea9f4e331c63c00810ee4b920e6f1af2d Wed Sep 11 15:37:11 2013 -0400
+
+TCP/IP: 1 GbE network
+IB    : IB QDR network 
+
+<<result>>
+
+## TCP/IP connection
+
+# server(192.168.11.8)
+$ iperf -s 
+
+# client
+$ iperf -c 192.168.11.8
+------------------------------------------------------------
+Client connecting to 192.168.11.8, TCP port 5001
+TCP window size: 64.0 KByte (default)
+------------------------------------------------------------
+[  3] local 192.168.11.16 port 38173 connected with 192.168.11.8 port 5001
+[ ID] Interval       Transfer     Bandwidth
+[  3]  0.0-10.0 sec  1.11 GBytes   950 Mbits/sec
+
+
+## IB connection by rspreload
+
+# server(172.24.0.8)
+$ LD_PRELOAD=/usr/local/lib/rsocket/librspreload.so iperf -s
+
+# client
+$ LD_PRELOAD=/usr/local/lib/rsocket/librspreload.so iperf -c 172.24.0.8
+------------------------------------------------------------
+Client connecting to 172.24.0.8, TCP port 5001
+TCP window size:  128 KByte (default)
+------------------------------------------------------------
+[  3] local 172.24.0.16 port 51626 connected with 172.24.0.8 port 5001
+[ ID] Interval       Transfer     Bandwidth
+[  3]  0.0-10.0 sec  22.9 GBytes  19.7 Gbits/sec
+
+<<summary>>
+
+Confirmed strong RDMA acceleration with rspreload.
+
+EoL.
